@@ -47,10 +47,32 @@ if "auto_premium" not in st.session_state:
     st.session_state.auto_premium = 20.0
 if "auto_lot" not in st.session_state:
     st.session_state.auto_lot = 250
+if "auto_expiry_days" not in st.session_state:
+    st.session_state.auto_expiry_days = 7
 if "chain_data" not in st.session_state:
     st.session_state.chain_data = None
 if "chain_symbol" not in st.session_state:
     st.session_state.chain_symbol = ""
+
+# NSE F&O Lot Sizes (updated as of 2026 Q1 — verify quarterly at nseindia.com)
+NSE_LOT_SIZES = {
+    "RELIANCE": 500, "TCS": 175, "HDFCBANK": 550, "INFY": 400, "ICICIBANK": 700,
+    "HINDUNILVR": 300, "SBIN": 1500, "BHARTIARTL": 475, "ITC": 1600, "KOTAKBANK": 400,
+    "LT": 300, "AXISBANK": 1200, "ASIANPAINT": 200, "MARUTI": 50, "BAJFINANCE": 125,
+    "BAJAJFINSV": 500, "SUNPHARMA": 700, "TITAN": 175, "WIPRO": 1500, "ULTRACEMCO": 50,
+    "NESTLEIND": 250, "POWERGRID": 1800, "NTPC": 1500, "M&M": 700, "TATAMOTORS": 1425,
+    "TATASTEEL": 5500, "JSWSTEEL": 675, "HINDALCO": 1075, "ADANIPORTS": 625, "ADANIENT": 300,
+    "GRASIM": 250, "BAJAJ-AUTO": 75, "HEROMOTOCO": 150, "EICHERMOT": 175, "DIVISLAB": 200,
+    "DRREDDY": 125, "CIPLA": 650, "APOLLOHOSP": 125, "BRITANNIA": 200, "COALINDIA": 2100,
+    "ONGC": 3850, "IOC": 4875, "BPCL": 1800, "GAIL": 6100, "TATACONSUM": 900,
+    "INDUSINDBK": 400, "TECHM": 600, "HCLTECH": 350, "LTIM": 150, "SBILIFE": 375,
+    "HDFCLIFE": 1100, "ICICIPRULI": 1500, "PIDILITIND": 250, "SHRIRAMFIN": 450,
+    "MOTHERSON": 6800, "TRENT": 500, "ADANIPOWER": 1875, "VEDL": 1550, "OLAELEC": 9000,
+}
+
+def get_lot_size(symbol):
+    """Get NSE F&O lot size for a symbol. Returns default 100 if unknown."""
+    return NSE_LOT_SIZES.get(symbol.upper().replace(".NS", ""), 100)
 
 # =====================================================================
 # SIDEBAR — TRADE INPUT
@@ -65,7 +87,7 @@ fetch_chain = st.sidebar.button("📊 Fetch Live Option Chain", use_container_wi
 strike_price = st.sidebar.number_input("Strike Price", min_value=0.0, value=st.session_state.auto_strike, step=5.0)
 premium = st.sidebar.number_input("Current Premium (₹)", min_value=0.0, value=st.session_state.auto_premium, step=0.5)
 lot_size = st.sidebar.number_input("Lot Size", min_value=1, value=st.session_state.auto_lot, step=1)
-expiry_days = st.sidebar.number_input("Days to Expiry", min_value=0, value=7, step=1)
+expiry_days = st.sidebar.number_input("Days to Expiry", min_value=0, value=st.session_state.auto_expiry_days, step=1)
 capital = st.sidebar.number_input("Capital Deployed (₹)", min_value=0.0, value=5000.0, step=500.0)
 
 run_analysis = st.sidebar.button("🚀 RUN 360° ANALYSIS", type="primary", use_container_width=True)
@@ -532,10 +554,21 @@ def layer4_fundamental(symbol, option_type):
 def fetch_option_chain(symbol):
     """
     Fetches NSE option chain. Returns dict with:
-    - spot, expiries, chain (DataFrame), error (if any)
-    Has fallbacks: tries nsepython → direct NSE → returns helpful error
+    - spot, expiries, chain (DataFrame), error (if any), diagnostics
+    Has fallbacks: tries nsepython → direct NSE → returns helpful error with HTTP details
     """
-    result = {"success": False, "spot": None, "expiries": [], "chain": None, "error": None}
+    result = {"success": False, "spot": None, "expiries": [], "chain": None, "error": None, "diagnostics": []}
+    
+    # ---- Check market hours (helps diagnose weekend issues) ----
+    from datetime import datetime
+    now = datetime.now()
+    is_weekend = now.weekday() >= 5
+    hour = now.hour
+    is_market_hours = (9 <= hour <= 15) and not is_weekend
+    if is_weekend:
+        result["diagnostics"].append("⚠️ Today is a weekend (NSE closed) — option chain API often unreliable")
+    elif not is_market_hours:
+        result["diagnostics"].append(f"⚠️ Outside market hours (now {hour}:xx IST) — NSE data may be stale")
     
     # ---- Method 1: nsepython ----
     try:
@@ -545,6 +578,9 @@ def fetch_option_chain(symbol):
             spot = data["records"].get("underlyingValue")
             expiries = data["records"].get("expiryDates", [])
             raw = data["records"].get("data", [])
+            
+            if not raw:
+                result["diagnostics"].append("nsepython returned empty 'data' array — possibly weekend/holiday")
             
             rows = []
             for item in raw:
@@ -579,54 +615,127 @@ def fetch_option_chain(symbol):
                     "expiries": expiries,
                     "chain": df,
                 })
+                result["diagnostics"].append(f"✅ nsepython succeeded ({len(df)} strikes)")
                 return result
+            else:
+                result["diagnostics"].append("nsepython parsed but resulted in empty DataFrame")
+        else:
+            result["diagnostics"].append(f"nsepython returned unexpected structure: {type(data).__name__}")
     except Exception as e:
-        result["error"] = f"nsepython failed: {str(e)[:200]}"
+        result["diagnostics"].append(f"nsepython exception: {type(e).__name__}: {str(e)[:150]}")
     
-    # ---- Method 2: Direct NSE API (fallback) ----
+    # ---- Method 2: Direct NSE API (fallback) with HTTP status diagnostics ----
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://www.nseindia.com/option-chain",
+            "Connection": "keep-alive",
         }
         session = requests.Session()
         session.headers.update(headers)
-        # NSE requires a session cookie first
-        session.get("https://www.nseindia.com", timeout=10)
+        
+        # Cookie warmup
+        try:
+            r0 = session.get("https://www.nseindia.com", timeout=10)
+            result["diagnostics"].append(f"NSE homepage HTTP {r0.status_code}")
+        except Exception as e:
+            result["diagnostics"].append(f"NSE homepage unreachable: {type(e).__name__}")
+        
         url = f"https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
-        r = session.get(url, timeout=10)
+        r = session.get(url, timeout=15)
+        result["diagnostics"].append(f"NSE option-chain API HTTP {r.status_code}")
+        
         if r.status_code == 200:
-            data = r.json()
-            spot = data.get("records", {}).get("underlyingValue")
-            raw = data.get("records", {}).get("data", [])
-            rows = []
-            for item in raw:
-                strike = item.get("strikePrice")
-                expiry = item.get("expiryDate")
-                ce = item.get("CE", {}) or {}
-                pe = item.get("PE", {}) or {}
-                rows.append({
-                    "strike": strike, "expiry": expiry,
-                    "ce_ltp": ce.get("lastPrice", 0), "ce_oi": ce.get("openInterest", 0),
-                    "ce_oi_chg": ce.get("changeinOpenInterest", 0),
-                    "ce_volume": ce.get("totalTradedVolume", 0),
-                    "ce_iv": ce.get("impliedVolatility", 0),
-                    "pe_ltp": pe.get("lastPrice", 0), "pe_oi": pe.get("openInterest", 0),
-                    "pe_oi_chg": pe.get("changeinOpenInterest", 0),
-                    "pe_volume": pe.get("totalTradedVolume", 0),
-                    "pe_iv": pe.get("impliedVolatility", 0),
-                })
-            df = pd.DataFrame(rows)
-            if not df.empty:
-                result.update({"success": True, "spot": spot, "chain": df})
+            try:
+                data = r.json()
+                spot = data.get("records", {}).get("underlyingValue")
+                raw = data.get("records", {}).get("data", [])
+                if not raw:
+                    result["diagnostics"].append("API returned 200 but empty data — likely market closed or symbol invalid")
+                rows = []
+                for item in raw:
+                    strike = item.get("strikePrice")
+                    expiry = item.get("expiryDate")
+                    ce = item.get("CE", {}) or {}
+                    pe = item.get("PE", {}) or {}
+                    rows.append({
+                        "strike": strike, "expiry": expiry,
+                        "ce_ltp": ce.get("lastPrice", 0), "ce_oi": ce.get("openInterest", 0),
+                        "ce_oi_chg": ce.get("changeinOpenInterest", 0),
+                        "ce_volume": ce.get("totalTradedVolume", 0),
+                        "ce_iv": ce.get("impliedVolatility", 0),
+                        "pe_ltp": pe.get("lastPrice", 0), "pe_oi": pe.get("openInterest", 0),
+                        "pe_oi_chg": pe.get("changeinOpenInterest", 0),
+                        "pe_volume": pe.get("totalTradedVolume", 0),
+                        "pe_iv": pe.get("impliedVolatility", 0),
+                    })
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    result.update({"success": True, "spot": spot, "chain": df})
+                    result["diagnostics"].append(f"✅ Direct API succeeded ({len(df)} strikes)")
+                    return result
+            except ValueError as e:
+                result["diagnostics"].append(f"API returned 200 but invalid JSON: {str(e)[:100]}")
+        elif r.status_code == 401:
+            result["diagnostics"].append("HTTP 401 — NSE requires authentication (session cookie failed)")
+        elif r.status_code == 403:
+            result["diagnostics"].append("HTTP 403 — NSE is actively BLOCKING this IP (cloud server detected)")
+        elif r.status_code == 429:
+            result["diagnostics"].append("HTTP 429 — rate limited. Wait 60s and retry.")
+        elif r.status_code in (502, 503, 504):
+            result["diagnostics"].append(f"HTTP {r.status_code} — NSE server unavailable. Try in 5 min.")
+    except requests.exceptions.Timeout:
+        result["diagnostics"].append("Request timeout — slow network or NSE not responding")
+    except Exception as e:
+        result["diagnostics"].append(f"Direct API exception: {type(e).__name__}: {str(e)[:150]}")
+    
+    # ---- Method 3: yfinance-based degraded fallback ----
+    # Gives spot + historical volatility (HV as IV proxy). No live OI/PCR.
+    try:
+        yf_sym = symbol + ".NS" if not symbol.endswith(".NS") else symbol
+        tk = yf.Ticker(yf_sym)
+        info = tk.info
+        spot_yf = info.get("currentPrice") or info.get("regularMarketPrice")
+        
+        if spot_yf:
+            hist = tk.history(period="3mo", interval="1d")
+            if len(hist) > 20:
+                returns = hist["Close"].pct_change().dropna()
+                hist_vol = float(returns.std() * (252 ** 0.5) * 100)
+                
+                result["diagnostics"].append(f"⚙️ yfinance fallback engaged. Spot ₹{spot_yf:.2f}, HV {hist_vol:.1f}%")
+                result["success"] = True
+                result["spot"] = spot_yf
+                result["fallback_mode"] = True
+                result["hist_vol"] = hist_vol
+                result["chain"] = pd.DataFrame([])
                 return result
     except Exception as e:
-        result["error"] = (result.get("error") or "") + f" | direct API failed: {str(e)[:150]}"
+        result["diagnostics"].append(f"yfinance fallback exception: {type(e).__name__}: {str(e)[:120]}")
     
-    if not result["error"]:
-        result["error"] = "NSE blocked the request. Try again in 30 seconds, or NSE may be blocking cloud IPs."
+    # ---- Compose honest error message ----
+    if is_weekend:
+        result["error"] = "Markets closed (weekend). NSE option chain API typically doesn't serve data on Saturdays/Sundays. Try Monday 9:30 AM IST."
+    elif not is_market_hours:
+        result["error"] = "Outside market hours. NSE option chain data is most reliable during 9:15 AM - 3:30 PM IST on weekdays."
+    else:
+        # Check diagnostics to give honest reason
+        diag_text = " ".join(result["diagnostics"])
+        if "403" in diag_text:
+            result["error"] = "NSE is blocking cloud server IPs (HTTP 403). This is a known issue with cloud-hosted apps. Solutions: 1) Try again in 30s. 2) Run app locally on your PC. 3) Use Kite Connect API."
+        elif "429" in diag_text:
+            result["error"] = "Rate limited by NSE (HTTP 429). Too many recent requests. Wait 60 seconds."
+        elif "401" in diag_text:
+            result["error"] = "NSE auth handshake failed. Cookie session not established. Retry in 30s."
+        elif "timeout" in diag_text.lower():
+            result["error"] = "Network timeout — NSE servers slow or unreachable. Retry in a moment."
+        elif "empty" in diag_text.lower():
+            result["error"] = "NSE responded but returned no data. Possible reasons: invalid symbol, no F&O contracts, or market data not updated yet."
+        else:
+            result["error"] = "Unknown failure. See diagnostics tab for HTTP details."
+    
     return result
 
 
@@ -648,10 +757,11 @@ def filter_chain_for_expiry(chain_df, expiry_str=None):
 # =====================================================================
 # LAYER 5 — OPTION CHAIN HEALTH
 # =====================================================================
-def layer5_option_chain(chain_data, symbol, strike_price, option_type):
+def layer5_option_chain(chain_data, symbol, strike_price, option_type, premium=None, expiry_days=7):
     """
     The institutional edge layer.
     Checks: PCR, Max Pain, IV vs chain, OI buildup at strike, ATM IV percentile.
+    Fallback mode: uses yfinance spot + HV for theoretical premium check.
     """
     result = {"score": 0, "details": {}, "max": 100, "notes": [], "health": "Unknown"}
     is_call = option_type.startswith("CE")
@@ -664,6 +774,89 @@ def layer5_option_chain(chain_data, symbol, strike_price, option_type):
         result["details"]["error"] = chain_data.get("error") if chain_data else "Not fetched"
         return result
     
+    # ---- FALLBACK MODE: yfinance-based partial signals ----
+    if chain_data.get("fallback_mode"):
+        spot = chain_data["spot"]
+        hist_vol = chain_data.get("hist_vol", 25)
+        result["details"]["spot"] = round(spot, 2)
+        result["details"]["historical_vol"] = f"{hist_vol:.1f}%"
+        result["details"]["data_source"] = "yfinance (NSE chain blocked)"
+        
+        # 1. Moneyness check (25 pts)
+        moneyness_pct = ((strike_price - spot) / spot) * 100
+        result["details"]["moneyness_pct"] = f"{moneyness_pct:+.2f}%"
+        if is_call:
+            if -2 <= moneyness_pct <= 2: result["score"] += 25; result["notes"].append(f"✅ Near-ATM strike ({moneyness_pct:+.1f}%) — good liquidity zone")
+            elif 2 < moneyness_pct <= 5: result["score"] += 15; result["notes"].append(f"🟡 Mildly OTM ({moneyness_pct:+.1f}%)")
+            elif moneyness_pct > 5: result["score"] += 5; result["notes"].append(f"❌ Deep OTM ({moneyness_pct:+.1f}%) — lottery ticket risk")
+            else: result["score"] += 18; result["notes"].append(f"🟡 ITM ({moneyness_pct:+.1f}%) — pays for intrinsic")
+        else:
+            if -2 <= moneyness_pct <= 2: result["score"] += 25; result["notes"].append(f"✅ Near-ATM strike ({moneyness_pct:+.1f}%) — good liquidity zone")
+            elif -5 <= moneyness_pct < -2: result["score"] += 15; result["notes"].append(f"🟡 Mildly OTM ({moneyness_pct:+.1f}%)")
+            elif moneyness_pct < -5: result["score"] += 5; result["notes"].append(f"❌ Deep OTM ({moneyness_pct:+.1f}%) — lottery ticket risk")
+            else: result["score"] += 18; result["notes"].append(f"🟡 ITM ({moneyness_pct:+.1f}%) — pays for intrinsic")
+        
+        # 2. Theoretical premium check using simplified Black-Scholes (35 pts)
+        if premium and premium > 0:
+            try:
+                import math
+                T = max(expiry_days / 365.0, 1/365)  # avoid div by zero
+                sigma = hist_vol / 100.0
+                r = 0.07  # India risk-free rate ~7%
+                S = spot
+                K = strike_price
+                
+                # Simplified theoretical option price (Black-Scholes)
+                d1 = (math.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*math.sqrt(T))
+                d2 = d1 - sigma*math.sqrt(T)
+                
+                # Normal CDF approximation
+                def norm_cdf(x):
+                    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+                
+                if is_call:
+                    theo_price = S*norm_cdf(d1) - K*math.exp(-r*T)*norm_cdf(d2)
+                else:
+                    theo_price = K*math.exp(-r*T)*norm_cdf(-d2) - S*norm_cdf(-d1)
+                
+                theo_price = max(theo_price, 0.5)  # floor at 0.5
+                result["details"]["theoretical_premium"] = round(theo_price, 2)
+                result["details"]["actual_premium"] = premium
+                
+                premium_ratio = premium / theo_price
+                result["details"]["premium_vs_theoretical"] = f"{premium_ratio:.2f}x"
+                
+                if 0.85 <= premium_ratio <= 1.15: result["score"] += 35; result["notes"].append(f"✅ Premium fair (₹{premium} vs theoretical ₹{theo_price:.2f})")
+                elif 0.7 <= premium_ratio < 0.85: result["score"] += 28; result["notes"].append(f"✅ Premium cheap ({premium_ratio:.2f}x theo)")
+                elif 1.15 < premium_ratio <= 1.4: result["score"] += 15; result["notes"].append(f"🟡 Premium expensive ({premium_ratio:.2f}x theo) — overpaying ~{(premium_ratio-1)*100:.0f}%")
+                elif premium_ratio > 1.4: result["score"] += 5; result["notes"].append(f"❌ Premium very expensive ({premium_ratio:.2f}x theo) — high IV, overpaying")
+                else: result["score"] += 20; result["notes"].append(f"🟡 Premium suspiciously cheap — verify quote")
+            except Exception as e:
+                result["score"] += 17
+                result["notes"].append(f"🟡 Theoretical price calc skipped: {str(e)[:80]}")
+        else:
+            result["score"] += 17
+        
+        # 3. Volatility regime (25 pts)
+        if 18 <= hist_vol <= 30: result["score"] += 25; result["notes"].append(f"✅ Healthy HV ({hist_vol:.1f}%) — good for buying")
+        elif 30 < hist_vol <= 45: result["score"] += 15; result["notes"].append(f"🟡 Elevated HV ({hist_vol:.1f}%) — premiums expensive")
+        elif hist_vol < 18: result["score"] += 10; result["notes"].append(f"🟡 Low HV ({hist_vol:.1f}%) — limited movement expected")
+        else: result["score"] += 5; result["notes"].append(f"❌ Very high HV ({hist_vol:.1f}%) — IV crush risk")
+        
+        # 4. Time-to-expiry sanity (15 pts)
+        if expiry_days >= 5: result["score"] += 15; result["notes"].append(f"✅ Reasonable time ({expiry_days}d) — theta manageable")
+        elif expiry_days >= 2: result["score"] += 8; result["notes"].append(f"🟡 Short DTE ({expiry_days}d) — aggressive theta")
+        else: result["score"] += 3; result["notes"].append(f"❌ Very short DTE ({expiry_days}d) — high gamma+theta risk")
+        
+        result["notes"].append("ℹ️ Limited mode — no PCR/MaxPain/OI signals (NSE chain blocked)")
+        
+        if result["score"] >= 70: result["health"] = "Strong (HV-based) ✅"
+        elif result["score"] >= 50: result["health"] = "Moderate (HV-based) 🟡"
+        else: result["health"] = "Weak (HV-based) ❌"
+        
+        return result
+    
+    # ---- FULL MODE: NSE option chain available ----
     try:
         chain = chain_data["chain"]
         spot = chain_data["spot"]
@@ -895,6 +1088,39 @@ if fetch_chain:
         st.session_state.chain_symbol = symbol
     
     if chain_data["success"]:
+        # Check if it's fallback mode (no actual chain data)
+        if chain_data.get("fallback_mode"):
+            st.warning(f"⚙️ NSE chain unavailable — using yfinance fallback for {symbol}. Spot: ₹{chain_data['spot']:.2f}, HV: {chain_data.get('hist_vol', 0):.1f}%")
+            st.info("ℹ️ Limited mode: L5 will score based on moneyness, theoretical premium (Black-Scholes), and historical volatility instead of PCR/MaxPain/OI. Still useful — just less precise than NSE chain.")
+            
+            spot_fb = chain_data['spot']
+            suggested_lot_fb = get_lot_size(symbol)
+            # ATM strike rounded to nearest 5 or 50
+            round_to = 50 if spot_fb > 1000 else 5
+            suggested_strike_fb = round(spot_fb / round_to) * round_to
+            
+            st.markdown("### 💡 Suggested Setup (Fallback Mode)")
+            f1, f2, f3, f4 = st.columns(4)
+            f1.metric("Spot", f"₹{spot_fb:.2f}")
+            f2.metric("Suggested ATM Strike", f"₹{suggested_strike_fb:.0f}")
+            f3.metric("Lot Size (NSE)", f"{suggested_lot_fb}")
+            f4.metric("HV (IV proxy)", f"{chain_data.get('hist_vol', 0):.1f}%")
+            
+            st.markdown("⚠️ **Premium must be entered manually** (no live chain data). Check your broker terminal for current premium at this strike.")
+            
+            col_btn1, col_btn2 = st.columns([3, 1])
+            col_btn1.caption("Auto-fill will populate Strike + Lot Size. You'll still need to enter Premium manually from your terminal.")
+            if col_btn2.button("⚡ Auto-Fill (Partial)", use_container_width=True, type="primary"):
+                st.session_state.auto_strike = float(suggested_strike_fb)
+                st.session_state.auto_lot = suggested_lot_fb
+                st.rerun()
+            
+            with st.expander("🔍 Why didn't NSE chain work?"):
+                for d in chain_data.get("diagnostics", []):
+                    st.write(f"• {d}")
+            
+            st.stop()
+        
         st.success(f"✅ Option chain fetched for {symbol}. Spot: ₹{chain_data['spot']:.2f}")
         df_filtered = filter_chain_for_expiry(chain_data["chain"])
         spot = chain_data["spot"]
@@ -934,23 +1160,83 @@ if fetch_chain:
             "PE OI Chg": "{:+,.0f}", "PE IV": "{:.1f}%", "PE Vol": "{:,.0f}",
         }), use_container_width=True, height=520)
         
-        # Quick auto-fill: pick ATM strike + matching premium for current option_type
+        # Quick auto-fill: pick ATM strike + matching premium + lot size + DTE
         atm_row = df_display.iloc[df_display["atm_dist"].argmin()]
         suggested_strike = float(atm_row["strike"])
         suggested_premium = float(atm_row["ce_ltp"] if option_type.startswith("CE") else atm_row["pe_ltp"])
+        suggested_lot = get_lot_size(symbol)
         
-        c1, c2, c3 = st.columns([2, 2, 1])
-        c1.info(f"💡 Suggested ATM Strike: **₹{suggested_strike:.0f}**")
-        c2.info(f"💡 Suggested Premium ({option_type.split()[0]}): **₹{suggested_premium:.2f}**")
-        if c3.button("⚡ Auto-Fill ATM", use_container_width=True):
+        # Compute DTE from nearest expiry in the chain
+        suggested_dte = 7  # default fallback
+        try:
+            expiry_str = atm_row.get("expiry")
+            if expiry_str:
+                from datetime import datetime
+                exp_dt = pd.to_datetime(expiry_str, format="%d-%b-%Y", errors="coerce")
+                if pd.notna(exp_dt):
+                    today = pd.Timestamp.now().normalize()
+                    suggested_dte = max((exp_dt - today).days, 0)
+        except Exception:
+            pass
+        
+        # Show all 4 suggestions
+        st.markdown("### 💡 Suggested Trade Setup (ATM)")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Strike", f"₹{suggested_strike:.0f}")
+        s2.metric("Premium", f"₹{suggested_premium:.2f}")
+        s3.metric("Lot Size", f"{suggested_lot}")
+        s4.metric("Days to Expiry", f"{suggested_dte}d")
+        
+        # Affordability calc — how many lots fits current capital?
+        if suggested_premium > 0:
+            lots_affordable = int(capital // (suggested_premium * suggested_lot))
+            total_cost = lots_affordable * suggested_premium * suggested_lot
+            max_loss_35 = total_cost * 0.35
+            
+            st.markdown("### 💰 Position Sizing (based on current capital)")
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("Capital (sidebar)", f"₹{capital:,.0f}")
+            p2.metric("Lots Affordable", f"{lots_affordable}", f"₹{total_cost:,.0f} deployed")
+            p3.metric("Max Loss (35% SL)", f"₹{max_loss_35:,.0f}")
+            p4.metric("Cost per Lot", f"₹{suggested_premium * suggested_lot:,.0f}")
+            
+            if lots_affordable == 0:
+                st.warning(f"⚠️ Current capital ₹{capital:,.0f} is too small for 1 lot (₹{suggested_premium * suggested_lot:,.0f} per lot). Increase capital or pick a cheaper strike.")
+        
+        # Auto-fill button (fills all 4)
+        st.markdown("---")
+        col_btn1, col_btn2 = st.columns([3, 1])
+        col_btn1.caption("Click **Auto-Fill** to populate Strike, Premium, Lot Size, and DTE in the sidebar.")
+        if col_btn2.button("⚡ Auto-Fill ALL", use_container_width=True, type="primary"):
             st.session_state.auto_strike = suggested_strike
             st.session_state.auto_premium = suggested_premium
+            st.session_state.auto_lot = suggested_lot
+            st.session_state.auto_expiry_days = suggested_dte
             st.rerun()
         
         st.caption("After auto-fill, click '🚀 RUN 360° ANALYSIS' in the sidebar.")
     else:
         st.error(f"❌ Could not fetch option chain. {chain_data.get('error', '')}")
-        st.info("Try again in 30 seconds. NSE sometimes throttles cloud IPs. You can still enter strike/premium manually and run analysis.")
+        st.info("You can still enter strike/premium manually and run analysis — the other 4 layers work fine.")
+        
+        # Honest diagnostics
+        with st.expander("🔍 What actually went wrong? (Diagnostic details)"):
+            st.markdown("**Step-by-step what the app tried:**")
+            for d in chain_data.get("diagnostics", []):
+                st.write(f"• {d}")
+            st.markdown("---")
+            st.markdown("""
+            **How to interpret:**
+            - `HTTP 200` + empty data → NSE returned OK but no data (weekend/holiday/invalid symbol)
+            - `HTTP 401/403` → NSE is rejecting requests from this server
+            - `HTTP 429` → Rate limited, wait 60s
+            - `Timeout` → Network/NSE slow
+            - `nsepython exception` → Library issue, fallback to direct API
+            
+            **If you see HTTP 403 consistently on weekdays during market hours**, NSE is blocking Streamlit Cloud IPs and we need to either:
+            1. Run app locally on your PC (free)
+            2. Switch to Kite Connect API (₹500/month)
+            """)
     
     st.stop()  # don't continue to analysis on a chain-fetch click
 
@@ -973,7 +1259,7 @@ if run_analysis:
             chain_data = fetch_option_chain(symbol)
             st.session_state.chain_data = chain_data
             st.session_state.chain_symbol = symbol
-        l5 = layer5_option_chain(chain_data, symbol, strike_price, option_type)
+        l5 = layer5_option_chain(chain_data, symbol, strike_price, option_type, premium=premium, expiry_days=expiry_days)
     
     composite, verdict, vclass, reason = compute_verdict(l1, l2, l3, l4, l5)
     
