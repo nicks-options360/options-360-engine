@@ -612,6 +612,51 @@ if run_analysis:
     
     composite, verdict, vclass, reason = compute_verdict(l1, l2, l3, l4)
     
+    # ----- TRADE SUMMARY HEADER (company name + trade details) -----
+    company_name = symbol  # fallback
+    current_price = None
+    sector = ""
+    try:
+        info = yf.Ticker(to_yf(symbol)).info
+        company_name = info.get("longName") or info.get("shortName") or symbol
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+        sector = info.get("sector", "")
+    except Exception:
+        pass
+    
+    # Spot from technical layer as fallback
+    if not current_price:
+        current_price = l3.get("details", {}).get("spot_now") or l3.get("details", {}).get("daily_close")
+    
+    moneyness = ""
+    if current_price:
+        if option_type.startswith("CE"):
+            if strike_price < current_price * 0.98: moneyness = "🟢 ITM"
+            elif strike_price > current_price * 1.02: moneyness = "🔴 OTM"
+            else: moneyness = "🟡 ATM"
+        else:
+            if strike_price > current_price * 1.02: moneyness = "🟢 ITM"
+            elif strike_price < current_price * 0.98: moneyness = "🔴 OTM"
+            else: moneyness = "🟡 ATM"
+    
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#0E4D92,#1a6cc4);color:white;padding:18px 24px;border-radius:10px;margin-bottom:14px;">
+        <div style="font-size:13px;opacity:0.85;letter-spacing:1px;">ANALYZING TRADE</div>
+        <div style="font-size:24px;font-weight:700;margin-top:4px;">{company_name}</div>
+        <div style="font-size:14px;opacity:0.9;margin-top:2px;">{symbol} {f"• {sector}" if sector else ""} {f"• Spot ₹{current_price:.2f}" if current_price else ""}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Trade details strip
+    t1, t2, t3, t4, t5 = st.columns(5)
+    t1.metric("Option", option_type.split(" ")[0])
+    t2.metric("Strike", f"₹{strike_price:,.0f}", moneyness if moneyness else None)
+    t3.metric("Premium", f"₹{premium}")
+    t4.metric("Expiry", f"{expiry_days}d")
+    t5.metric("Capital", f"₹{capital:,.0f}")
+    
+    st.divider()
+    
     # ----- VERDICT BANNER -----
     st.markdown(f'<div class="{vclass}">FINAL VERDICT: {verdict}<br><span style="font-size:14px;font-weight:400">{reason}</span></div>', unsafe_allow_html=True)
     st.markdown(f"### Composite Score: **{composite:.1f} / 100**")
@@ -625,25 +670,48 @@ if run_analysis:
     
     st.divider()
     
-    # ----- TRADE PLAN -----
-    if "BUY" in verdict or "HOLD" in verdict:
-        plan = build_trade_plan(premium, lot_size, capital, expiry_days, l3)
-        st.subheader("📋 Trade Plan")
+    # ----- TRADE PLAN (always visible with verdict-specific framing) -----
+    plan = build_trade_plan(premium, lot_size, capital, expiry_days, l3)
+    
+    # Verdict-specific heading
+    if "BUY" in verdict:
+        st.subheader("📋 Trade Plan — Execute With Discipline")
+        st.success("✅ All 4 layers confirm. Plan below is your execution blueprint.")
+    elif "HOLD" in verdict:
+        st.subheader("📋 Trade Plan — Wait for Trigger")
+        st.info("🟡 Setup forming but not confirmed. Plan shown for watchlist. Wait for stronger trigger before entry.")
+    else:  # AVOID
+        st.subheader("📋 Hypothetical Trade Plan — DO NOT EXECUTE")
+        st.error("""
+        🚨 **VERDICT IS AVOID — DO NOT TAKE THIS TRADE**  
         
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Position Size", f"{plan['lots']} lots", f"₹{plan['total_premium']:,.0f} deployed")
-        c2.metric("Stop Loss (Premium)", f"₹{plan['sl_premium']}", f"-{plan['sl_drop_pct']}")
-        c3.metric("Max Loss", f"₹{plan['max_loss']:,.0f}")
+        The plan below is shown for **learning, journaling, and paper-trading only**.  
+        Hard vetoes were triggered in the engine. Taking this trade against the framework defeats the entire purpose of 360° reconfirmation.  
         
-        c4, c5, c6 = st.columns(3)
-        c4.metric("Target 1 (book 50%)", f"₹{plan['target_1']}", "+50%")
-        c5.metric("Target 2", f"₹{plan['target_2']}", "+100%")
-        c6.metric("Target 3 (runner)", f"₹{plan['target_3']}", "+200%")
-        
-        st.info(f"⏱️ **Time Stop:** {plan['time_stop']}")
-        st.info(f"📊 **Scaling:** {plan['scaling']}")
-        if "spot_sl_note" in plan:
-            st.warning(f"🎯 **Underlying Stop:** {plan['spot_sl_note']}")
+        **Use this section to:**
+        - Understand what the engine *would* have suggested if conditions improved
+        - Paper-trade and compare actual outcomes vs. engine logic
+        - Refine your scoring weights over time
+        """)
+    
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Position Size", f"{plan['lots']} lots", f"₹{plan['total_premium']:,.0f} deployed")
+    c2.metric("Stop Loss (Premium)", f"₹{plan['sl_premium']}", f"-{plan['sl_drop_pct']}")
+    c3.metric("Max Loss", f"₹{plan['max_loss']:,.0f}")
+    
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Target 1 (book 50%)", f"₹{plan['target_1']}", "+50%")
+    c5.metric("Target 2", f"₹{plan['target_2']}", "+100%")
+    c6.metric("Target 3 (runner)", f"₹{plan['target_3']}", "+200%")
+    
+    st.info(f"⏱️ **Time Stop:** {plan['time_stop']}")
+    st.info(f"📊 **Scaling:** {plan['scaling']}")
+    if "spot_sl_note" in plan:
+        st.warning(f"🎯 **Underlying Stop:** {plan['spot_sl_note']}")
+    
+    # Reinforce AVOID warning at the bottom
+    if "AVOID" in verdict:
+        st.error("⛔ Reminder: This trade is flagged AVOID. The plan above is illustrative only.")
     
     st.divider()
     
