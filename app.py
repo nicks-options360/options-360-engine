@@ -41,6 +41,7 @@ st.markdown('<div class="main-header">🎯 Options 360° Decision Engine</div>',
 st.caption("5-Layer Reconfirmation: Macro → News → Technical → Fundamental → Option Chain")
 
 # Initialize session state for auto-filled values
+# Initialize session state for auto-filled values
 if "auto_strike" not in st.session_state:
     st.session_state.auto_strike = 1300.0
 if "auto_premium" not in st.session_state:
@@ -125,11 +126,44 @@ option_type = st.sidebar.selectbox("Option Type", ["CE (Call)", "PE (Put)"])
 
 fetch_chain = st.sidebar.button("📊 Try Fetching Option Chain", use_container_width=True, help="NSE may block cloud IPs. If it fails, just enter Strike + Premium manually below from your broker terminal.")
 
-strike_price = st.sidebar.number_input("Strike Price", min_value=0.0, value=st.session_state.auto_strike, step=5.0)
-premium = st.sidebar.number_input("Current Premium (₹)", min_value=0.0, value=st.session_state.auto_premium, step=0.5)
-lot_size = st.sidebar.number_input("Lot Size", min_value=1, value=st.session_state.auto_lot, step=1)
-expiry_days = st.sidebar.number_input("Days to Expiry", min_value=0, value=st.session_state.auto_expiry_days, step=1)
-capital = st.sidebar.number_input("Capital Deployed (₹)", min_value=0.0, value=5000.0, step=500.0)
+strike_price = st.sidebar.number_input(
+    "Strike Price",
+    min_value=0.0,
+    value=st.session_state.auto_strike,
+    step=5.0,
+    key="strike_widget",
+    help="Enter strike from your broker terminal, or use Auto-Fill after fetching chain.",
+)
+premium = st.sidebar.number_input(
+    "Current Premium (₹)",
+    min_value=0.0,
+    value=st.session_state.auto_premium,
+    step=0.5,
+    key="premium_widget",
+    help="Enter live premium from your broker terminal. Leave 0 if not yet known.",
+)
+lot_size = st.sidebar.number_input(
+    "Lot Size",
+    min_value=1,
+    value=st.session_state.auto_lot,
+    step=1,
+    key="lot_widget",
+    help="Auto-filled from NSE F&O list (May-26 cycle). Verify with broker.",
+)
+expiry_days = st.sidebar.number_input(
+    "Days to Expiry",
+    min_value=0,
+    value=st.session_state.auto_expiry_days,
+    step=1,
+    key="dte_widget",
+)
+capital = st.sidebar.number_input(
+    "Capital Deployed (₹)",
+    min_value=0.0,
+    value=5000.0,
+    step=500.0,
+    key="capital_widget",
+)
 
 run_analysis = st.sidebar.button("🚀 RUN 360° ANALYSIS", type="primary", use_container_width=True)
 
@@ -1150,10 +1184,20 @@ if fetch_chain:
             st.markdown("⚠️ **Premium must be entered manually** (no live chain data). Check your broker terminal for current premium at this strike.")
             
             col_btn1, col_btn2 = st.columns([3, 1])
-            col_btn1.caption("Auto-fill will populate Strike + Lot Size. You'll still need to enter Premium manually from your terminal.")
+            col_btn1.caption("Auto-fill populates Strike + Lot Size. Premium is cleared to 0 — enter it manually from your broker terminal before running analysis.")
             if col_btn2.button("⚡ Auto-Fill (Partial)", use_container_width=True, type="primary"):
+                # Update both session_state vars AND widget keys for proper rerun behavior
                 st.session_state.auto_strike = float(suggested_strike_fb)
                 st.session_state.auto_lot = suggested_lot_fb
+                st.session_state.auto_premium = 0.0   # Clear premium — user must enter manually
+                # Also clear the widget keys so they pick up new values on rerun
+                if "strike_widget" in st.session_state:
+                    st.session_state.strike_widget = float(suggested_strike_fb)
+                if "lot_widget" in st.session_state:
+                    st.session_state.lot_widget = suggested_lot_fb
+                if "premium_widget" in st.session_state:
+                    st.session_state.premium_widget = 0.0
+                st.success(f"✅ Strike set to ₹{suggested_strike_fb:.0f}, Lot Size set to {suggested_lot_fb}. Premium cleared — enter manually before running analysis.")
                 st.rerun()
             
             with st.expander("🔍 Why didn't NSE chain work?"):
@@ -1249,10 +1293,21 @@ if fetch_chain:
         col_btn1, col_btn2 = st.columns([3, 1])
         col_btn1.caption("Click **Auto-Fill** to populate Strike, Premium, Lot Size, and DTE in the sidebar.")
         if col_btn2.button("⚡ Auto-Fill ALL", use_container_width=True, type="primary"):
+            # Update session_state vars
             st.session_state.auto_strike = suggested_strike
             st.session_state.auto_premium = suggested_premium
             st.session_state.auto_lot = suggested_lot
             st.session_state.auto_expiry_days = suggested_dte
+            # Also update widget keys directly so rerun reflects them
+            if "strike_widget" in st.session_state:
+                st.session_state.strike_widget = float(suggested_strike)
+            if "premium_widget" in st.session_state:
+                st.session_state.premium_widget = float(suggested_premium)
+            if "lot_widget" in st.session_state:
+                st.session_state.lot_widget = int(suggested_lot)
+            if "dte_widget" in st.session_state:
+                st.session_state.dte_widget = int(suggested_dte)
+            st.success(f"✅ All fields auto-filled: Strike ₹{suggested_strike:.0f}, Premium ₹{suggested_premium:.2f}, Lot {suggested_lot}, DTE {suggested_dte}d")
             st.rerun()
         
         st.caption("After auto-fill, click '🚀 RUN 360° ANALYSIS' in the sidebar.")
