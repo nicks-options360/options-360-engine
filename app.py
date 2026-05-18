@@ -58,6 +58,25 @@ if "chain_data" not in st.session_state:
 if "chain_symbol" not in st.session_state:
     st.session_state.chain_symbol = ""
 
+# Pending auto-fill values — set by buttons, applied at next script start
+if "pending_fill" not in st.session_state:
+    st.session_state.pending_fill = None
+
+# Apply any pending auto-fill BEFORE widgets are instantiated
+# This is the bulletproof Streamlit pattern for programmatic widget updates
+if st.session_state.pending_fill is not None:
+    fill = st.session_state.pending_fill
+    if "strike" in fill:
+        st.session_state.strike_widget = float(fill["strike"])
+    if "premium" in fill:
+        st.session_state.premium_widget = float(fill["premium"])
+    if "lot" in fill:
+        st.session_state.lot_widget = int(fill["lot"])
+    if "dte" in fill:
+        st.session_state.dte_widget = int(fill["dte"])
+    st.session_state.last_fill_message = fill.get("message", "")
+    st.session_state.pending_fill = None  # consume it
+
 # NSE F&O Lot Sizes — sourced from user-uploaded NSE CSV (May-26 cycle).
 # 213 contracts including major stocks + indices (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY).
 # IMPORTANT: 46 stocks have lot size CHANGES from Jun-26 → Jul-26 cycle. Examples below.
@@ -123,6 +142,11 @@ def get_lot_size(symbol):
 # SIDEBAR — TRADE INPUT
 # =====================================================================
 st.sidebar.header("📋 Trade Setup")
+
+# Show auto-fill confirmation banner in sidebar (clears after viewing)
+if st.session_state.get("last_fill_message"):
+    st.sidebar.success(st.session_state.last_fill_message)
+    st.session_state.last_fill_message = ""  # consume so it doesn't persist
 
 symbol = st.sidebar.text_input("NSE Symbol (e.g. RELIANCE, HDFCBANK)", value="RELIANCE").upper().strip()
 option_type = st.sidebar.selectbox("Option Type", ["CE (Call)", "PE (Put)"])
@@ -1184,11 +1208,13 @@ if fetch_chain:
             col_btn1, col_btn2 = st.columns([3, 1])
             col_btn1.caption("Auto-fill populates Strike + Lot Size. Premium is cleared to 0 — enter it manually from your broker terminal before running analysis.")
             if col_btn2.button("⚡ Auto-Fill (Partial)", use_container_width=True, type="primary", key="partial_autofill_btn"):
-                # Direct widget key updates — Streamlit will reflect on rerun
-                st.session_state.strike_widget = float(suggested_strike_fb)
-                st.session_state.lot_widget = int(suggested_lot_fb)
-                st.session_state.premium_widget = 0.0  # Clear premium — user must enter manually
-                st.success(f"✅ Strike set to ₹{suggested_strike_fb:.0f}, Lot Size set to {suggested_lot_fb}. Premium cleared — enter manually before running analysis.")
+                # Stage the fill — will be applied at the top of next script run
+                st.session_state.pending_fill = {
+                    "strike": float(suggested_strike_fb),
+                    "lot": int(suggested_lot_fb),
+                    "premium": 0.0,
+                    "message": f"✅ Strike set to ₹{suggested_strike_fb:.0f}, Lot Size set to {suggested_lot_fb}. Premium cleared — enter manually before running analysis.",
+                }
                 st.rerun()
             
             with st.expander("🔍 Why didn't NSE chain work?"):
@@ -1284,12 +1310,14 @@ if fetch_chain:
         col_btn1, col_btn2 = st.columns([3, 1])
         col_btn1.caption("Click **Auto-Fill** to populate Strike, Premium, Lot Size, and DTE in the sidebar.")
         if col_btn2.button("⚡ Auto-Fill ALL", use_container_width=True, type="primary", key="full_autofill_btn"):
-            # Direct widget key updates — Streamlit will reflect on rerun
-            st.session_state.strike_widget = float(suggested_strike)
-            st.session_state.premium_widget = float(suggested_premium)
-            st.session_state.lot_widget = int(suggested_lot)
-            st.session_state.dte_widget = int(suggested_dte)
-            st.success(f"✅ All fields auto-filled: Strike ₹{suggested_strike:.0f}, Premium ₹{suggested_premium:.2f}, Lot {suggested_lot}, DTE {suggested_dte}d")
+            # Stage the fill — will be applied at the top of next script run
+            st.session_state.pending_fill = {
+                "strike": float(suggested_strike),
+                "premium": float(suggested_premium),
+                "lot": int(suggested_lot),
+                "dte": int(suggested_dte),
+                "message": f"✅ All fields auto-filled: Strike ₹{suggested_strike:.0f}, Premium ₹{suggested_premium:.2f}, Lot {suggested_lot}, DTE {suggested_dte}d",
+            }
             st.rerun()
         
         st.caption("After auto-fill, click '🚀 RUN 360° ANALYSIS' in the sidebar.")
