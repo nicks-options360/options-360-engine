@@ -123,7 +123,7 @@ st.sidebar.header("📋 Trade Setup")
 symbol = st.sidebar.text_input("NSE Symbol (e.g. RELIANCE, HDFCBANK)", value="RELIANCE").upper().strip()
 option_type = st.sidebar.selectbox("Option Type", ["CE (Call)", "PE (Put)"])
 
-fetch_chain = st.sidebar.button("📊 Fetch Live Option Chain", use_container_width=True)
+fetch_chain = st.sidebar.button("📊 Try Fetching Option Chain", use_container_width=True, help="NSE may block cloud IPs. If it fails, just enter Strike + Premium manually below from your broker terminal.")
 
 strike_price = st.sidebar.number_input("Strike Price", min_value=0.0, value=st.session_state.auto_strike, step=5.0)
 premium = st.sidebar.number_input("Current Premium (₹)", min_value=0.0, value=st.session_state.auto_premium, step=0.5)
@@ -1446,7 +1446,7 @@ if run_analysis:
     st.caption("⚠️ Signal-only tool. Verify all signals against your own analysis. Past performance ≠ future results. Trade at your own risk.")
 
 else:
-    st.info("👈 Enter trade details in the sidebar. Optionally click **📊 Fetch Live Option Chain** first to auto-fill strike/premium, then **🚀 RUN 360° ANALYSIS**.")
+    st.info("👈 **Standard workflow:** Enter Symbol, Option Type, Strike (from your terminal), Premium (from your terminal), DTE, Capital → click **🚀 RUN 360° ANALYSIS**. Optionally try **📊 Try Fetching Option Chain** for live OI/PCR/MaxPain signals (may fail due to NSE cloud-IP blocking — fallback to manual entry if so).")
     
     st.markdown("""
     ### How the 5-Layer Quintuple Lock Works
@@ -1474,5 +1474,5 @@ else:
     - Fundamentals not Contrary
     - Option Chain ≥ 35 (if fetched)
     
-    💡 **Pro Tip:** Click "📊 Fetch Live Option Chain" before running analysis. You'll see all strikes with OI, IV, and volumes, and can auto-fill ATM strike + premium with one click.
+    💡 **Practical note on L5:** NSE blocks most cloud server IPs (HTTP 403). Layer 5 will usually run in **fallback mode** (yfinance + Black-Scholes for theoretical premium check + HV regime check) on Streamlit Cloud. This still gives you valuable signals (moneyness, overpaying flag, vol regime) — just not PCR/MaxPain/OI. For full L5 access, options are: (a) run app locally on your PC, or (b) use Kite Connect API (₹500/mo). Decide after 2 weeks of paper trading.
     """)
